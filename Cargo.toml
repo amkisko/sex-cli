@@ -1,0 +1,32 @@
+[package]
+name = "sex-cli"
+version = "0.1.0"
+edition = "2021"
+description = "Sentry Error eXplorer CLI"
+authors = ["amkisko"]
+license = "proprietary"
+
+[dependencies]
+clap = { version = "4.4", features = ["derive"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+crossterm = "0.27"
+dirs = "5.0"
+reqwest = { version = "0.11", features = ["blocking", "json"] }
+anyhow = "1.0"
+sodiumoxide = "0.2"
+base64 = "0.21"
+keyring = "2.3"
+rand = "0.8"
+
+[dev-dependencies]
+tempfile = "3.8"
+assert_fs = "1.0"
+predicates = "3.0"
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
