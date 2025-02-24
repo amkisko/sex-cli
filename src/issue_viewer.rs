@@ -1,6 +1,6 @@
+use crate::tui::Tui;
 use anyhow::Result;
 use crossterm::event::{KeyCode, KeyEvent};
-use crate::tui::Tui;
 
 #[derive(Debug, PartialEq)]
 pub struct Issue {
@@ -43,7 +43,7 @@ impl IssueViewer {
 
         loop {
             self.render()?;
-            
+
             match self.tui.read_key()? {
                 KeyEvent {
                     code: KeyCode::Char('q'),
@@ -69,29 +69,39 @@ impl IssueViewer {
         self.tui.clear()?;
 
         // Draw main box
-        self.tui.draw_box(0, 0, self.tui.width(), self.tui.height())?;
+        self.tui
+            .draw_box(0, 0, self.tui.width(), self.tui.height())?;
 
         // Draw title
         self.tui.write_at(2, 1, "Issue Details")?;
-        self.tui.write_at(self.tui.width() - 20, 1, "Press 'q' to quit")?;
+        self.tui
+            .write_at(self.tui.width() - 20, 1, "Press 'q' to quit")?;
 
         // Draw horizontal separator
-        for i in 1..self.tui.width()-1 {
+        for i in 1..self.tui.width() - 1 {
             self.tui.write_at(i, 2, "─")?;
         }
 
         // Draw issue details
         self.tui.write_at(2, 3, &format!("ID: {}", self.issue.id))?;
-        self.tui.write_at(2, 4, &format!("Title: {}", self.issue.title))?;
-        self.tui.write_at(2, 5, &format!("Status: {}", self.issue.status))?;
-        self.tui.write_at(2, 6, &format!("Level: {}", self.issue.level))?;
-        self.tui.write_at(2, 7, &format!("Culprit: {}", self.issue.culprit))?;
-        self.tui.write_at(2, 8, &format!("Last Seen: {}", self.issue.last_seen))?;
-        self.tui.write_at(2, 9, &format!("Events: {}", self.issue.events))?;
-        self.tui.write_at(2, 10, &format!("Users Affected: {}", self.issue.users))?;
+        self.tui
+            .write_at(2, 4, &format!("Title: {}", self.issue.title))?;
+        self.tui
+            .write_at(2, 5, &format!("Status: {}", self.issue.status))?;
+        self.tui
+            .write_at(2, 6, &format!("Level: {}", self.issue.level))?;
+        self.tui
+            .write_at(2, 7, &format!("Culprit: {}", self.issue.culprit))?;
+        self.tui
+            .write_at(2, 8, &format!("Last Seen: {}", self.issue.last_seen))?;
+        self.tui
+            .write_at(2, 9, &format!("Events: {}", self.issue.events))?;
+        self.tui
+            .write_at(2, 10, &format!("Users Affected: {}", self.issue.users))?;
 
         // Draw footer
-        self.tui.write_at(2, self.tui.height() - 1, "j/k: scroll down/up")?;
+        self.tui
+            .write_at(2, self.tui.height() - 1, "j/k: scroll down/up")?;
 
         Ok(())
     }
@@ -163,4 +173,4 @@ mod tests {
         viewer.render()?;
         Ok(())
     }
-} 
+}

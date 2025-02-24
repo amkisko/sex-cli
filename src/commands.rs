@@ -1,20 +1,29 @@
+use crate::config::{Config, Organization};
+use crate::dashboard::Dashboard;
+use crate::issue_viewer::{Issue as ViewerIssue, IssueViewer};
+use crate::sentry::SentryClient;
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
+use clap_complete::{generate, Shell};
 use crossterm::{
     cursor::{self, Hide, Show},
     event::{self, Event, KeyCode},
     execute,
-    terminal::{self, Clear, ClearType},
     style::{Color, Print, SetForegroundColor},
+    terminal::{self, Clear, ClearType},
 };
 use std::io::{self, Write};
-use crate::config::{Config, Organization};
-use crate::issue_viewer::{Issue as ViewerIssue, IssueViewer};
-use crate::sentry::SentryClient;
-use crate::dashboard::Dashboard;
 
 #[derive(Parser, Debug)]
-#[command(author, version, about)]
+#[command(
+    author,
+    version,
+    about = "Sentry Explorer CLI - A tool for exploring and monitoring Sentry issues"
+)]
+#[command(
+    long_about = "A command-line interface tool for exploring Sentry issues and data, \
+    with support for multiple organizations, real-time monitoring, and encrypted token storage."
+)]
 pub struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -22,53 +31,110 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug, PartialEq)]
 enum Commands {
-    /// Manage organizations
+    /// Manage Sentry organizations
+    #[command(about = "Manage Sentry organizations and their settings")]
     Org {
         #[command(subcommand)]
         command: OrgCommands,
     },
-    /// Manage issues
+    /// Manage Sentry projects
+    #[command(about = "View and manage Sentry projects", alias = "p")]
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommands,
+    },
+    /// Manage Sentry issues
+    #[command(
+        about = "View and manage Sentry issues across organizations",
+        alias = "i"
+    )]
     Issue {
         #[command(subcommand)]
         command: IssueCommands,
     },
-    /// Login to Sentry
+    /// Login to a Sentry organization
+    #[command(about = "Authenticate with a Sentry organization")]
     Login {
-        /// Organization name
-        org: String,
-        /// Authentication token
-        token: String,
+        /// Use browser-based OAuth login instead of token
+        #[arg(long, help = "Use browser-based OAuth login flow")]
+        browser: bool,
+        /// Organization name (optional, will be detected automatically if not provided)
+        #[arg(help = "Name of the organization to authenticate with")]
+        org: Option<String>,
     },
     /// Monitor issues in real-time
+    #[command(
+        about = "Start a real-time dashboard for monitoring Sentry issues",
+        alias = "m"
+    )]
     Monitor {
-        /// Organization name
-        org: String,
-        /// Project slug (defaults to 'default')
-        #[arg(default_value = "default")]
-        project: String,
+        /// Organization and project in format: [org/]project
+        #[arg(
+            help = "Project to monitor in format: [org/]project (e.g. 'my-org/my-project' or just 'my-project')"
+        )]
+        target: String,
+    },
+    /// Generate shell completions
+    #[command(about = "Generate shell completion scripts")]
+    Completion {
+        /// Shell to generate completions for
+        #[arg(value_enum)]
+        shell: Shell,
     },
 }
 
 #[derive(Subcommand, Debug, PartialEq)]
 enum OrgCommands {
-    /// List organizations
+    /// List configured organizations
+    #[command(about = "List all configured organizations and their authentication status")]
     List,
-    /// Add an organization
+    /// Add a new organization
+    #[command(about = "Add a new Sentry organization to the configuration")]
     Add {
-        /// Organization name
+        /// Organization name (used for local reference)
+        #[arg(help = "Name to identify the organization locally")]
         name: String,
-        /// Organization slug
+        /// Organization slug (from Sentry URL)
+        #[arg(
+            help = "Organization slug from Sentry URL (e.g., 'my-org' from sentry.io/organizations/my-org/)"
+        )]
         slug: String,
+    },
+    /// List organization projects
+    #[command(about = "List all projects in an organization")]
+    Projects {
+        /// Organization name
+        #[arg(help = "Name of the organization")]
+        name: String,
+    },
+}
+
+#[derive(Subcommand, Debug, PartialEq)]
+enum ProjectCommands {
+    /// List all projects across organizations
+    #[command(about = "List all projects from all authenticated organizations")]
+    List,
+    /// Show project information
+    #[command(about = "Show detailed project information including stats")]
+    Info {
+        /// Project identifier in format: [org/]project
+        #[arg(
+            help = "Project to show in format: [org/]project (e.g. 'my-org/my-project' or just 'my-project')"
+        )]
+        target: String,
     },
 }
 
 #[derive(Subcommand, Debug, PartialEq)]
 enum IssueCommands {
-    /// List issues
+    /// List recent issues
+    #[command(about = "List recent unresolved issues from all authenticated organizations")]
     List,
-    /// View issue details
+    /// View detailed issue information
+    #[command(about = "View detailed information about a specific issue in an interactive viewer")]
     View {
         /// Issue ID
+        #[arg(help = "Issue ID from Sentry (found in issue URL or list command)")]
         id: String,
     },
 }
@@ -80,21 +146,66 @@ impl Cli {
         let mut client = SentryClient::new()?;
 
         match cli.command {
-            Commands::Login { org, token } => {
-                let org_entry = config.get_organization_mut(&org)
-                    .ok_or_else(|| anyhow::anyhow!("Organization '{}' not found. Add it first with 'org add'.", org))?;
+            Commands::Login { browser, org } => {
+                if browser {
+                    let sentry_org = client.login_with_browser()?;
+                    let org_name = org.unwrap_or_else(|| sentry_org.slug.clone());
+                    // Add organization if it doesn't exist
+                    if !config.organizations.contains_key(&org_name) {
+                        config.add_organization(org_name.clone(), sentry_org.slug);
+                        println!("Added new organization: {}", org_name);
+                    }
 
-                org_entry.set_auth_token(token)?;
-                config.save()?;
-                println!("Successfully logged in to Sentry for organization: {}", org);
+                    let org_entry = config.get_organization_mut(&org_name).unwrap();
+                    if let Some(token) = client.get_current_token() {
+                        org_entry.set_auth_token(token)?;
+                        config.save()?;
+                        println!(
+                            "Successfully logged in to Sentry for organization: {}",
+                            org_name
+                        );
+                    }
+                } else {
+                    let org = org.ok_or_else(|| {
+                        anyhow::anyhow!("Organization name is required for token-based login")
+                    })?;
+                    let org_entry = config.get_organization_mut(&org).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Organization '{}' not found. Add it first with 'org add'.",
+                            org
+                        )
+                    })?;
+
+                    client.login_with_prompt()?;
+                    if let Some(token) = client.get_current_token() {
+                        org_entry.set_auth_token(token)?;
+                        config.save()?;
+                        println!("Successfully logged in to Sentry for organization: {}", org);
+                    }
+                }
             }
-            Commands::Monitor { org, project } => {
-                if !org.is_empty() {
-                    let org_entry = config.get_organization(&org)
-                        .ok_or_else(|| anyhow::anyhow!("Organization '{}' not found. Add it first with 'org add'.", org))?;
+            Commands::Monitor { target } => {
+                let (org, project) = if let Some((org_part, project_part)) = target.split_once('/')
+                {
+                    (org_part.to_string(), project_part.to_string())
+                } else {
+                    (String::new(), target)
+                };
 
-                    let token = org_entry.get_auth_token()?
-                        .ok_or_else(|| anyhow::anyhow!("Not logged in for organization '{}'. Use 'login' first.", org))?;
+                if !org.is_empty() {
+                    let org_entry = config.get_organization(&org).ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Organization '{}' not found. Add it first with 'org add'.",
+                            org
+                        )
+                    })?;
+
+                    let token = org_entry.get_auth_token()?.ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "Not logged in for organization '{}'. Use 'login' first.",
+                            org
+                        )
+                    })?;
 
                     client.login(token)?;
                     start_monitor(&client, org_entry.slug.clone(), project)?;
@@ -110,8 +221,14 @@ impl Cli {
                             if org.has_project(&project) {
                                 matches.push((org.clone(), token));
                             } else if let Ok(projects) = client.list_projects(&org.slug) {
-                                if let Some(found_project) = projects.iter().find(|p| p.slug == project) {
-                                    to_cache.push((org.name.clone(), project.clone(), found_project.name.clone()));
+                                if let Some(found_project) =
+                                    projects.iter().find(|p| p.slug == project)
+                                {
+                                    to_cache.push((
+                                        org.name.clone(),
+                                        project.clone(),
+                                        found_project.name.clone(),
+                                    ));
                                     matches.push((org.clone(), token));
                                 }
                             }
@@ -137,7 +254,11 @@ impl Cli {
                             start_monitor(&client, org.slug.clone(), project)?;
                         }
                         _ => {
-                            let org = select_organization(&matches)?;
+                            let matches_owned: Vec<(Organization, String)> = matches
+                                .into_iter()
+                                .map(|(org, token)| (org.clone(), token.clone()))
+                                .collect();
+                            let org = select_organization(&matches_owned[..])?;
                             if let Some(Ok(project_name)) = org.0.get_project(&project) {
                                 println!("Selected project: {} ({})", project_name, project);
                             }
@@ -174,6 +295,15 @@ impl Cli {
                     config.add_organization(name.clone(), slug.clone());
                     config.save()?;
                     println!("Added organization: {} ({})", name, slug);
+                }
+                OrgCommands::Projects { name } => {
+                    let org = config
+                        .get_organization(&name)
+                        .ok_or_else(|| anyhow::anyhow!("Organization '{}' not found", name))?;
+                    println!("Projects in organization: {}", name);
+                    for project in org.projects.keys() {
+                        println!("  - {}", project);
+                    }
                 }
             },
             Commands::Issue { command } => match command {
@@ -230,6 +360,74 @@ impl Cli {
                     }
                 }
             },
+            Commands::Project { command } => match command {
+                ProjectCommands::List => {
+                    if config.organizations.is_empty() {
+                        println!("No organizations configured. Add one first with 'org add'.");
+                        return Ok(());
+                    }
+
+                    for org in config.organizations.values() {
+                        if let Some(token) = org.get_auth_token()? {
+                            client.login(token)?;
+                            println!("\nProjects in organization: {}", org.name);
+                            let projects = client.list_projects(&org.slug)?;
+
+                            if projects.is_empty() {
+                                println!("  No projects found");
+                            } else {
+                                for project in projects {
+                                    let platform =
+                                        project.platform.unwrap_or_else(|| "-".to_string());
+                                    let access = if project.hasAccess.unwrap_or(false) {
+                                        "✓"
+                                    } else {
+                                        "✗"
+                                    };
+                                    println!(
+                                        "  {} {} [{}] {}",
+                                        access, project.name, platform, project.slug
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                ProjectCommands::Info { target } => {
+                    let (org, project) =
+                        if let Some((org_part, project_part)) = target.split_once('/') {
+                            (org_part.to_string(), project_part.to_string())
+                        } else {
+                            (String::new(), target)
+                        };
+
+                    if !org.is_empty() {
+                        let org_entry = config.get_organization(&org).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Organization '{}' not found. Add it first with 'org add'.",
+                                org
+                            )
+                        })?;
+
+                        let token = org_entry.get_auth_token()?.ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Not logged in for organization '{}'. Use 'login' first.",
+                                org
+                            )
+                        })?;
+
+                        client.login(token)?;
+                        start_project_info(&client, org_entry.slug.clone(), project)?;
+                    } else {
+                        println!("Project identifier must include organization");
+                    }
+                }
+            },
+            Commands::Completion { shell } => {
+                let mut cmd = Self::command();
+                let bin_name = cmd.get_name().to_string();
+                generate(shell, &mut cmd, bin_name, &mut io::stdout());
+            }
         }
 
         Ok(())
@@ -242,12 +440,11 @@ impl Cli {
 }
 
 fn start_monitor(client: &SentryClient, org_slug: String, project_slug: String) -> Result<()> {
-    println!("Starting monitor for organization: {} project: {}", org_slug, project_slug);
-    let mut dashboard = Dashboard::new(
-        client.clone(),
-        org_slug,
-        project_slug,
+    println!(
+        "Starting monitor for organization: {} project: {}",
+        org_slug, project_slug
     );
+    let mut dashboard = Dashboard::new(client.clone(), org_slug, project_slug);
     dashboard.run()
 }
 
@@ -270,7 +467,11 @@ fn select_organization(matches: &[(Organization, String)]) -> Result<(&Organizat
 
         for (i, (org, _)) in matches.iter().enumerate() {
             let prefix = if i == selected { "> " } else { "  " };
-            let color = if i == selected { Color::Green } else { Color::Reset };
+            let color = if i == selected {
+                Color::Green
+            } else {
+                Color::Reset
+            };
 
             execute!(
                 io::stdout(),
@@ -306,6 +507,19 @@ fn select_organization(matches: &[(Organization, String)]) -> Result<(&Organizat
     result.ok_or_else(|| anyhow::anyhow!("No organization selected"))
 }
 
+fn start_project_info(client: &SentryClient, org_slug: String, project_slug: String) -> Result<()> {
+    println!(
+        "Starting project info for organization: {} project: {}",
+        org_slug, project_slug
+    );
+    let project_info = client.get_project_info(&org_slug, &project_slug)?;
+    println!("Project Info:");
+    for (key, value) in project_info {
+        println!("  {}: {}", key, value);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,7 +527,12 @@ mod tests {
     #[test]
     fn test_org_list_command() {
         let cli = Cli::parse_from(&["sex-cli", "org", "list"]);
-        assert!(matches!(cli.command, Commands::Org { command: OrgCommands::List }));
+        assert!(matches!(
+            cli.command,
+            Commands::Org {
+                command: OrgCommands::List
+            }
+        ));
     }
 
     #[test]
@@ -333,7 +552,12 @@ mod tests {
     #[test]
     fn test_issue_list_command() {
         let cli = Cli::parse_from(&["sex-cli", "issue", "list"]);
-        assert!(matches!(cli.command, Commands::Issue { command: IssueCommands::List }));
+        assert!(matches!(
+            cli.command,
+            Commands::Issue {
+                command: IssueCommands::List
+            }
+        ));
     }
 
     #[test]
@@ -351,28 +575,54 @@ mod tests {
 
     #[test]
     fn test_login_command() {
-        let cli = Cli::parse_from(&["sex-cli", "login", "test-org", "test-token"]);
+        let cli = Cli::parse_from(&["sex-cli", "login", "test-org"]);
         assert!(matches!(
             cli.command,
-            Commands::Login { org, token }
-            if org == "test-org" && token == "test-token"
+            Commands::Login { org }
+            if org == "test-org"
         ));
     }
 
     #[test]
     fn test_monitor_command() {
-        let cli = Cli::parse_from(&["sex-cli", "monitor", "test-org"]);
+        // Test project-only format
+        let cli = Cli::parse_from(&["sex-cli", "monitor", "my-project"]);
         assert!(matches!(
             cli.command,
-            Commands::Monitor { org, project }
-            if org == "test-org" && project == "default"
+            Commands::Monitor { target }
+            if target == "my-project"
         ));
 
-        let cli = Cli::parse_from(&["sex-cli", "monitor", "test-org", "my-project"]);
+        // Test org/project format
+        let cli = Cli::parse_from(&["sex-cli", "monitor", "test-org/my-project"]);
         assert!(matches!(
             cli.command,
-            Commands::Monitor { org, project }
-            if org == "test-org" && project == "my-project"
+            Commands::Monitor { target }
+            if target == "test-org/my-project"
         ));
     }
-} 
+
+    #[test]
+    fn test_project_list_command() {
+        let cli = Cli::parse_from(&["sex-cli", "project", "list"]);
+        assert!(matches!(
+            cli.command,
+            Commands::Project {
+                command: ProjectCommands::List
+            }
+        ));
+    }
+
+    #[test]
+    fn test_project_info_command() {
+        let cli = Cli::parse_from(&["sex-cli", "project", "info", "test-org/my-project"]);
+        assert!(matches!(
+            cli.command,
+            Commands::Project {
+                command: ProjectCommands::Info {
+                    target,
+                }
+            } if target == "test-org/my-project"
+        ));
+    }
+}

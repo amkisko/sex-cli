@@ -1,0 +1,53 @@
+#!/bin/sh
+
+set -e
+
+# Colors for output
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+BINARY="./target/release/sex-cli"
+
+needs_rebuild() {
+    # If binary doesn't exist, rebuild is needed
+    if [ ! -f "$BINARY" ]; then
+        return 0
+    fi
+
+    # Get binary modification time
+    BINARY_TIME=$(stat -f %m "$BINARY")
+
+    # Find the newest file among source files and cargo configs
+    # Returns empty if no files are newer than binary
+    NEWER_FILES=$(find src Cargo.* -type f \( -name "*.rs" -o -name "Cargo.*" \) -newer "$BINARY")
+
+    # If any newer files were found, rebuild is needed
+    [ -n "$NEWER_FILES" ]
+}
+
+if needs_rebuild; then
+    echo "${YELLOW}Changes detected, rebuilding...${NC}"
+    # Clean and rebuild the project in release mode
+    cargo clean
+    
+    if [[ -n "$RELEASE" ]]; then
+        cargo build --release
+    else
+        cargo build
+    fi
+
+    # Check if build was successful
+    if [ ! $? -eq 0 ]; then
+        echo "${RED}Build failed!${NC}"
+        exit 1
+    fi
+# else
+#     echo "${GREEN}Binary is up to date${NC}"
+fi
+
+# echo "${GREEN}Running sex-cli...${NC}"
+# echo "----------------------------------------"
+# Run the release binary with all arguments passed to this script
+"$BINARY" "$@" 

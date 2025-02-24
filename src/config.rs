@@ -1,16 +1,18 @@
 use anyhow::{Context, Result};
+use base64::Engine;
+use keyring::Entry;
+use rand::RngCore;
 use serde::{Deserialize, Serialize};
+use sodiumoxide::crypto::secretbox;
 use std::collections::HashMap;
 use std::fs;
 use std::path::PathBuf;
-use sodiumoxide::crypto::secretbox;
-use keyring::Entry;
-use rand::RngCore;
-use base64::Engine;
 
 const KEYRING_SERVICE: &str = "sex-cli";
 const KEYRING_USERNAME: &str = "project-encryption-key";
 const PROJECT_KEY_LENGTH: usize = 32;
+const APP_NAME: &str = "sex-cli";
+const CONFIG_FILE: &str = "config.json";
 
 #[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
 pub struct EncryptedProject {
@@ -19,25 +21,25 @@ pub struct EncryptedProject {
     pub slug: String,
 }
 
-#[derive(Debug, Serialize, Deserialize, PartialEq, Clone)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct Organization {
     pub name: String,
     pub slug: String,
-    #[serde(with = "encrypted_token")]
-    auth_token: Option<Vec<u8>>,
+    #[serde(skip)]
+    keyring: Option<Entry>,
     #[serde(default)]
     #[serde(with = "encrypted_projects")]
     pub(crate) projects: HashMap<String, EncryptedProject>,
 }
 
-#[derive(Debug, Default, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Config {
     pub organizations: HashMap<String, Organization>,
 }
 
 mod encrypted_data {
-    use serde::{Deserializer, Serializer, Deserialize};
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+    use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
+    use serde::{Deserialize, Deserializer, Serializer};
 
     pub fn serialize<S>(data: &Vec<u8>, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -52,7 +54,8 @@ mod encrypted_data {
         D: Deserializer<'de>,
     {
         let b64: String = String::deserialize(deserializer)?;
-        BASE64.decode(b64.as_bytes())
+        BASE64
+            .decode(b64.as_bytes())
             .map_err(serde::de::Error::custom)
     }
 }
@@ -83,39 +86,6 @@ mod encrypted_projects {
     }
 }
 
-mod encrypted_token {
-    use serde::{Deserializer, Serializer, Deserialize};
-    use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-
-    pub fn serialize<S>(token: &Option<Vec<u8>>, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: Serializer,
-    {
-        match token {
-            Some(bytes) => {
-                let b64 = BASE64.encode(bytes);
-                serializer.serialize_some(&b64)
-            }
-            None => serializer.serialize_none(),
-        }
-    }
-
-    pub fn deserialize<'de, D>(deserializer: D) -> Result<Option<Vec<u8>>, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let opt_b64: Option<String> = Option::deserialize(deserializer)?;
-        match opt_b64 {
-            Some(b64) => {
-                let bytes = BASE64.decode(b64.as_bytes())
-                    .map_err(serde::de::Error::custom)?;
-                Ok(Some(bytes))
-            }
-            None => Ok(None),
-        }
-    }
-}
-
 impl Config {
     pub fn load() -> Result<Self> {
         let config_path = get_config_path()?;
@@ -133,24 +103,27 @@ impl Config {
     pub fn save(&self) -> Result<()> {
         let config_path = get_config_path()?;
         if let Some(parent) = config_path.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create config directory: {}", parent.display()))?;
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create config directory: {}", parent.display())
+            })?;
         }
 
-        let content = serde_json::to_string_pretty(self)
-            .context("Failed to serialize config")?;
+        let content = serde_json::to_string_pretty(self).context("Failed to serialize config")?;
 
         fs::write(&config_path, content)
             .with_context(|| format!("Failed to write config file: {}", config_path.display()))
     }
 
     pub fn add_organization(&mut self, name: String, slug: String) {
-        self.organizations.insert(name.clone(), Organization {
-            name,
-            slug,
-            auth_token: None,
-            projects: HashMap::new(),
-        });
+        self.organizations.insert(
+            name.clone(),
+            Organization {
+                name,
+                slug,
+                keyring: None,
+                projects: HashMap::new(),
+            },
+        );
     }
 
     pub fn get_organization(&self, name: &str) -> Option<&Organization> {
@@ -163,7 +136,7 @@ impl Config {
 
     fn get_project_key() -> Result<[u8; PROJECT_KEY_LENGTH]> {
         let keyring = Entry::new(KEYRING_SERVICE, KEYRING_USERNAME)?;
-        
+
         match keyring.get_password() {
             Ok(key_str) => {
                 let key_bytes = base64::engine::general_purpose::STANDARD
@@ -184,9 +157,10 @@ impl Config {
         }
     }
 
+    #[allow(dead_code)]
     pub fn find_project(&self, project_slug: &str) -> Vec<(&Organization, bool)> {
         let mut matches = Vec::new();
-        
+
         // First, check cached projects
         for org in self.organizations.values() {
             if org.projects.contains_key(project_slug) {
@@ -196,7 +170,9 @@ impl Config {
 
         // If no matches in cache, return all orgs for live check
         if matches.is_empty() {
-            matches = self.organizations.values()
+            matches = self
+                .organizations
+                .values()
                 .map(|org| (org, false)) // false indicates it needs live check
                 .collect();
         }
@@ -204,19 +180,28 @@ impl Config {
         matches
     }
 
-    pub fn cache_project(&mut self, org_name: &str, project_slug: String, project_name: String) -> Result<()> {
+    pub fn cache_project(
+        &mut self,
+        org_name: &str,
+        project_slug: String,
+        project_name: String,
+    ) -> Result<()> {
         if let Some(org) = self.organizations.get_mut(org_name) {
             let key = Self::get_project_key()?;
             let nonce = secretbox::gen_nonce();
-            let encrypted_name = secretbox::seal(project_name.as_bytes(), &nonce, &secretbox::Key(key));
-            
+            let encrypted_name =
+                secretbox::seal(project_name.as_bytes(), &nonce, &secretbox::Key(key));
+
             let mut combined = nonce.as_ref().to_vec();
             combined.extend(encrypted_name);
 
-            org.projects.insert(project_slug.clone(), EncryptedProject {
-                name: combined,
-                slug: project_slug,
-            });
+            org.projects.insert(
+                project_slug.clone(),
+                EncryptedProject {
+                    name: combined,
+                    slug: project_slug,
+                },
+            );
             self.save()?;
         }
         Ok(())
@@ -224,35 +209,29 @@ impl Config {
 }
 
 impl Organization {
-    pub fn set_auth_token(&mut self, token: String) -> Result<()> {
-        let key = Config::get_project_key()?;
-        let nonce = secretbox::gen_nonce();
-        let encrypted = secretbox::seal(token.as_bytes(), &nonce, &secretbox::Key(key));
-        let mut combined = nonce.as_ref().to_vec();
-        combined.extend(encrypted);
-        self.auth_token = Some(combined);
-        Ok(())
-    }
-
-    pub fn get_auth_token(&self) -> Result<Option<String>> {
-        match &self.auth_token {
-            Some(combined) if combined.len() >= secretbox::NONCEBYTES => {
-                let key = Config::get_project_key()?;
-                let (nonce_bytes, encrypted) = combined.split_at(secretbox::NONCEBYTES);
-                let nonce = secretbox::Nonce::from_slice(nonce_bytes)
-                    .context("Invalid nonce length")?;
-                let decrypted = secretbox::open(encrypted, &nonce, &secretbox::Key(key))
-                    .map_err(|_| anyhow::anyhow!("Failed to decrypt auth token"))?;
-                String::from_utf8(decrypted)
-                    .context("Invalid UTF-8 in decrypted token")
-                    .map(Some)
-            }
-            _ => Ok(None),
+    pub fn new(name: String, slug: String) -> Self {
+        let keyring = Entry::new(&format!("{}-{}", APP_NAME, name), "auth-token").ok();
+        Self {
+            name,
+            slug,
+            keyring,
+            projects: HashMap::new(),
         }
     }
 
-    pub fn get_project(&self, project_slug: &str) -> Option<Result<String>> {
-        self.projects.get(project_slug).map(|project| {
+    pub fn get_auth_token(&self) -> Result<Option<String>> {
+        Ok(self.keyring.as_ref().and_then(|k| k.get_password().ok()))
+    }
+
+    pub fn set_auth_token(&mut self, token: String) -> Result<()> {
+        if let Some(keyring) = &self.keyring {
+            keyring.set_password(&token)?;
+        }
+        Ok(())
+    }
+
+    pub fn get_project(&self, slug: &str) -> Option<Result<String>> {
+        self.projects.get(slug).map(|project| {
             let key = Config::get_project_key()?;
             let combined = &project.name;
             if combined.len() < secretbox::NONCEBYTES {
@@ -260,26 +239,29 @@ impl Organization {
             }
 
             let (nonce_bytes, encrypted) = combined.split_at(secretbox::NONCEBYTES);
-            let nonce = secretbox::Nonce::from_slice(nonce_bytes)
-                .context("Invalid nonce length")?;
-            
+            let nonce =
+                secretbox::Nonce::from_slice(nonce_bytes).context("Invalid nonce length")?;
+
             let decrypted = secretbox::open(encrypted, &nonce, &secretbox::Key(key))
                 .map_err(|_| anyhow::anyhow!("Failed to decrypt project name"))?;
-            
-            String::from_utf8(decrypted)
-                .context("Invalid UTF-8 in decrypted project name")
+
+            String::from_utf8(decrypted).context("Invalid UTF-8 in decrypted project name")
         })
     }
 
-    pub fn has_project(&self, project_slug: &str) -> bool {
-        self.projects.contains_key(project_slug)
+    pub fn has_project(&self, slug: &str) -> bool {
+        self.projects.contains_key(slug)
     }
 
+    #[allow(dead_code)]
     pub fn add_project(&mut self, project_slug: String) {
-        self.projects.insert(project_slug.clone(), EncryptedProject {
-            name: Vec::new(),
-            slug: project_slug,
-        });
+        self.projects.insert(
+            project_slug.clone(),
+            EncryptedProject {
+                name: Vec::new(),
+                slug: project_slug,
+            },
+        );
     }
 }
 
@@ -303,7 +285,7 @@ mod tests {
         let org = config.get_organization("test").unwrap();
         assert_eq!(org.name, "test");
         assert_eq!(org.slug, "test-slug");
-        assert!(org.auth_token.is_none());
+        assert!(org.keyring.is_none());
     }
 
     #[test]
@@ -342,11 +324,11 @@ mod tests {
     fn test_load_nonexistent() -> Result<()> {
         let temp = assert_fs::TempDir::new()?;
         let config_file = temp.child("config.json");
-        
+
         assert!(!config_file.exists());
         let config = Config::default();
         assert_eq!(config.organizations.len(), 0);
 
         Ok(())
     }
-} 
+}

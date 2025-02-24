@@ -1,14 +1,14 @@
+use crate::sentry::{Issue, SentryClient};
 use anyhow::Result;
 use crossterm::{
     cursor,
     event::{self, Event, KeyCode},
     execute,
-    terminal::{self, ClearType},
     style::{Color, Print, SetForegroundColor},
+    terminal::{self, ClearType},
 };
 use std::io::{self, Write};
 use std::time::Duration;
-use crate::sentry::{SentryClient, Issue};
 
 pub struct Dashboard {
     client: SentryClient,
@@ -61,26 +61,20 @@ impl Dashboard {
 
     fn setup_terminal(&self) -> Result<()> {
         terminal::enable_raw_mode()?;
-        execute!(
-            io::stdout(),
-            terminal::EnterAlternateScreen,
-            cursor::Hide
-        )?;
+        execute!(io::stdout(), terminal::EnterAlternateScreen, cursor::Hide)?;
         Ok(())
     }
 
     fn cleanup_terminal(&self) -> Result<()> {
-        execute!(
-            io::stdout(),
-            terminal::LeaveAlternateScreen,
-            cursor::Show
-        )?;
+        execute!(io::stdout(), terminal::LeaveAlternateScreen, cursor::Show)?;
         terminal::disable_raw_mode()?;
         Ok(())
     }
 
     fn update_issues(&mut self) -> Result<()> {
-        let mut issues = self.client.list_issues(&self.org_slug, &self.project_slug)?;
+        let mut issues = self
+            .client
+            .list_issues(&self.org_slug, &self.project_slug)?;
         issues.sort_by(|a, b| b.count.cmp(&a.count));
         self.issues = issues.into_iter().take(10).collect();
         Ok(())
@@ -105,8 +99,10 @@ impl Dashboard {
         execute!(
             io::stdout(),
             SetForegroundColor(Color::Yellow),
-            Print(format!("{:<10} {:<40} {:<12} {:<8} {:<8}\n",
-                "ID", "Title", "Status", "Events", "Users")),
+            Print(format!(
+                "{:<10} {:<40} {:<12} {:<8} {:<8}\n",
+                "ID", "Title", "Status", "Events", "Users"
+            )),
             SetForegroundColor(Color::Reset)
         )?;
 
@@ -128,12 +124,9 @@ impl Dashboard {
             execute!(
                 io::stdout(),
                 SetForegroundColor(color),
-                Print(format!("{:<10} {:<40} {:<12} {:<8} {:<8}\n",
-                    id_short,
-                    title_short,
-                    issue.status,
-                    issue.count,
-                    issue.user_count
+                Print(format!(
+                    "{:<10} {:<40} {:<12} {:<8} {:<8}\n",
+                    id_short, title_short, issue.status, issue.count, issue.user_count
                 )),
                 SetForegroundColor(Color::Reset)
             )?;
@@ -163,12 +156,8 @@ mod tests {
     #[test]
     fn test_dashboard_creation() {
         let client = SentryClient::new().unwrap();
-        let dashboard = Dashboard::new(
-            client,
-            "test-org".to_string(),
-            "test-project".to_string()
-        );
+        let dashboard = Dashboard::new(client, "test-org".to_string(), "test-project".to_string());
         assert_eq!(dashboard.selected_index, 0);
         assert!(dashboard.issues.is_empty());
     }
-} 
+}
