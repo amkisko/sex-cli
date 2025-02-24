@@ -4,14 +4,19 @@ use reqwest::blocking::Client;
 use reqwest::header::{HeaderMap, HeaderValue, AUTHORIZATION};
 use rpassword::prompt_password;
 use serde::{Deserialize, Serialize};
+use std::env;
 use std::io::{self, Read, Write};
 use std::net::TcpListener;
 use std::process::Command;
 use urlencoding;
 
 const SENTRY_OAUTH_URL: &str = "https://sentry.io/oauth/authorize";
-const CLIENT_ID: &str = "***REMOVED***";
 const REDIRECT_URI: &str = "http://localhost:8123/callback";
+
+fn get_client_id() -> Result<String> {
+    dotenvy::dotenv().ok(); // Load .env file if it exists
+    env::var("SENTRY_CLIENT_ID").context("SENTRY_CLIENT_ID environment variable not set")
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Issue {
@@ -140,7 +145,7 @@ impl SentryClient {
         let auth_url = format!(
             "{}?client_id={}&response_type=token&redirect_uri={}&scope={}&state={}",
             SENTRY_OAUTH_URL,
-            CLIENT_ID,
+            get_client_id()?,
             REDIRECT_URI,
             "org:read project:read team:read member:read",
             Self::generate_state()
